@@ -424,6 +424,26 @@
     /* facilita tocar num trecho comentado */
     .trecho-comentado { padding: 2px 1px; }
   }
+
+  /* Botão Colar */
+  #btn-colar { background: #00b894; color: #06231c; font-weight: 700; }
+
+  /* Barra fixa de play/pause/parar (sempre visível embaixo) */
+  body { padding-bottom: 96px; }
+  #barra-fixa {
+    position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 10px; z-index: 900;
+    background: rgba(30,42,74,0.97); border: 1px solid #3a4070;
+    border-radius: 34px; padding: 8px 14px; box-shadow: 0 4px 18px rgba(0,0,0,0.55);
+  }
+  #barra-fixa button {
+    width: 54px; height: 54px; border-radius: 50%; border: none;
+    font-size: 1.35rem; cursor: pointer; color: #10202a; font-weight: 700;
+  }
+  #barra-fixa button:active { transform: scale(0.94); }
+  #fx-play { background: #00cec9; }
+  #fx-pause { background: #fdcb6e; }
+  #fx-stop { background: #d63031; color: #fff; }
 </style>
 </head>
 <body>
@@ -433,6 +453,7 @@
 <textarea id="input-texto" placeholder="Cole aqui a mensagem do Claude Code..."></textarea>
 
 <div class="controles">
+  <button id="btn-colar">📋 Colar</button>
   <button id="btn-carregar">▶ Carregar e Ouvir</button>
   <button id="btn-direto">ouvir sem filtro</button>
   <button id="btn-play" disabled>▶ Play</button>
@@ -735,6 +756,14 @@
         const elId = parseInt(el.dataset.elid);
         const fraseAlvo = fraseParaElId.indexOf(elId);
         tocarDe(fraseAlvo >= 0 ? fraseAlvo : 0);
+        // pré-seleciona o texto da frase clicada (facilita comentar sem segurar)
+        try {
+          const selc = window.getSelection();
+          selc.removeAllRanges();
+          const rg = document.createRange();
+          rg.selectNodeContents(el);
+          selc.addRange(rg);
+        } catch (_) {}
       });
     });
 
@@ -1020,8 +1049,8 @@
         if (e.results[i].isFinal) fim += e.results[i][0].transcript;
         else interim += e.results[i][0].transcript;
       }
-      if (fim) textoBase += fim;
-      popupInput.value = textoBase + interim;
+      if (fim) textoBase = (textoBase ? textoBase.replace(/\s+$/, '') + ' ' : '') + fim.trim();
+      popupInput.value = interim ? (textoBase ? textoBase + ' ' : '') + interim.trim() : textoBase;
     };
 
     recognition.onend = () => {
@@ -1158,6 +1187,42 @@
       else if (!btnPlay.disabled) btnPlay.click();
     }
   });
+</script>
+
+<!-- Barra fixa embaixo: play / pausar / parar (sempre visível) -->
+<div id="barra-fixa">
+  <button id="fx-play" title="Play">▶</button>
+  <button id="fx-pause" title="Pausar/Continuar">⏸</button>
+  <button id="fx-stop" title="Parar">⏹</button>
+</div>
+
+<script>
+(function () {
+  // Botão Colar: cola o conteúdo da área de transferência no campo de texto
+  var input = document.getElementById('input-texto');
+  window.__pasteText = function (t) {
+    if (!input) return;
+    input.value = (t == null ? '' : t);
+    try { input.dispatchEvent(new Event('input')); } catch (e) {}
+  };
+  var bc = document.getElementById('btn-colar');
+  if (bc) bc.addEventListener('click', function () {
+    if (window.AndroidNative && AndroidNative.pasteInto) {
+      AndroidNative.pasteInto();
+    } else if (navigator.clipboard && navigator.clipboard.readText) {
+      navigator.clipboard.readText().then(function (t) { window.__pasteText(t); }).catch(function () {});
+    }
+  });
+
+  // Barra fixa: repassa o toque para os botões reais de play/pausar/parar
+  function relay(fxId, realId) {
+    var fx = document.getElementById(fxId), r = document.getElementById(realId);
+    if (fx && r) fx.addEventListener('click', function () { r.click(); });
+  }
+  relay('fx-play', 'btn-play');
+  relay('fx-pause', 'btn-pause');
+  relay('fx-stop', 'btn-stop');
+})();
 </script>
 </body>
 </html>
