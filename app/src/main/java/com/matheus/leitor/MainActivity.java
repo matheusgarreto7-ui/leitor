@@ -417,10 +417,9 @@ public class MainActivity extends Activity {
             it.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
             it.putExtra(RecognizerIntent.EXTRA_LANGUAGE, recLang);
             it.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
-            // tolera pausas maiores antes de encerrar a sessão (ditado contínuo)
-            it.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 6000);
-            it.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 6000);
-            it.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 60000);
+            // Finaliza cada frase apos ~1s de silencio e recomeca (ditado continuo que NAO apaga).
+            it.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1000);
+            it.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 800);
             recognizer.startListening(it);
         } catch (Exception e) {
             restartSoon(500);
