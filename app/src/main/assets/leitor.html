@@ -434,6 +434,8 @@
 
   /* Botão Colar */
   #btn-colar { background: #00b894; color: #06231c; font-weight: 700; }
+  #btn-limpar-texto { background: #fdcb6e; color: #3d2c00; font-weight: 700; }
+  #btn-limpar-texto.confirmando { background: #ff7675; color: #2d0000; }
 
   /* Barra fixa de play/pause/parar (sempre visível embaixo) */
   body { padding-bottom: 96px; }
@@ -459,6 +461,7 @@
 
 <div class="controles">
   <button id="btn-colar">📋 Colar</button>
+  <button id="btn-limpar-texto">🧹 Limpar</button>
   <button id="btn-carregar">▶ Carregar e Ouvir</button>
   <button id="btn-direto">ouvir sem filtro</button>
   <button id="btn-play" disabled>▶ Play</button>
@@ -549,7 +552,79 @@
   const progressoFill = $('progresso-fill');
   const progressoBar  = $('progresso-bar');
 
-  sliderVel.addEventListener('input', () => velDisplay.textContent = (+sliderVel.value).toFixed(1) + '×');
+  // ── Armazenamento a prova de falha ────────────────────────────
+  // Em alguns WebViews o localStorage pode lancar excecao. Sem esta protecao,
+  // um erro aqui derrubava todo o resto do app (comentarios, notas, microfone).
+  function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+  function lsDel(k) { try { localStorage.removeItem(k); } catch (e) {} }
+
+  // ── Velocidade da leitura: fica gravada entre sessões ─────────
+  const VEL_KEY = 'leitor_velocidade';
+
+  function mostrarVel() { velDisplay.textContent = (+sliderVel.value).toFixed(1) + '×'; }
+
+  function lerVelSalva() {
+    let v = null;
+    // preferimos o armazenamento nativo: sobrevive mesmo se o WebView limpar o localStorage
+    try { if (window.AndroidNative && AndroidNative.getPref) v = AndroidNative.getPref(VEL_KEY, ''); } catch (e) {}
+    if (!v) v = lsGet(VEL_KEY);
+    const n = parseFloat(v);
+    return (isFinite(n) && n >= 0.5 && n <= 3) ? n : null;
+  }
+
+  function gravarVel(n) {
+    const txt = String(n);
+    lsSet(VEL_KEY, txt);
+    try { if (window.AndroidNative && AndroidNative.setPref) AndroidNative.setPref(VEL_KEY, txt); } catch (e) {}
+  }
+
+  const velSalva = lerVelSalva();
+  if (velSalva !== null) sliderVel.value = velSalva;
+  mostrarVel();
+
+  let velTimer = null;
+  sliderVel.addEventListener('input', () => {
+    mostrarVel();
+    clearTimeout(velTimer);
+    velTimer = setTimeout(() => gravarVel(+sliderVel.value), 300);
+  });
+
+  // ── Limpar o texto para colar outro ──────────────────────
+  const btnLimparTexto = $('btn-limpar-texto');
+  let confirmarTimer = null;
+
+  function resetarBotaoLimpar() {
+    clearTimeout(confirmarTimer);
+    confirmarTimer = null;
+    btnLimparTexto.textContent = '🧹 Limpar';
+    btnLimparTexto.classList.remove('confirmando');
+  }
+
+  function limparTexto() {
+    try { synth.cancel(); } catch (e) {}
+    frases = []; indiceAtual = 0; emPausa = false; paragrafosEls = [];
+    inputTexto.value = '';
+    textoRender.innerHTML = '';
+    listaRemovida.innerHTML = '';
+    blocoRemovido.style.display = 'none';
+    progressoFill.style.width = '0%';
+    statusEl.textContent = 'Texto limpo. Cole outro para ouvir.';
+    resetarBotoes();
+    try { inputTexto.focus(); } catch (e) {}
+  }
+
+  // Confirmação no próprio botão (dois toques), para não apagar sem querer.
+  btnLimparTexto.addEventListener('click', () => {
+    if (!confirmarTimer) {
+      btnLimparTexto.textContent = 'Confirmar?';
+      btnLimparTexto.classList.add('confirmando');
+      confirmarTimer = setTimeout(resetarBotaoLimpar, 3000);
+      return;
+    }
+    resetarBotaoLimpar();
+    limparTexto();
+  });
 
   // ── Vozes ─────────────────────────────────────────────────────
   function carregarVozes() {
@@ -889,7 +964,9 @@
   btnStop.addEventListener('click', () => { indiceAtual = 0; pararTudo(); progressoFill.style.width = '0%'; statusEl.textContent = 'Parado.'; });
 
   // ── Sistema de comentários ────────────────────────────────────
-  let comentarios = JSON.parse(localStorage.getItem('leitor_comentarios') || '[]');
+  let comentarios = (function () {
+    try { return JSON.parse(lsGet('leitor_comentarios') || '[]'); } catch (e) { return []; }
+  })();
   let selecaoAtual = null; // {text, range}
 
   const btnComentar    = $('btn-comentar-flutuante');
@@ -1128,7 +1205,7 @@
   });
 
   function salvarComentariosLS() {
-    localStorage.setItem('leitor_comentarios', JSON.stringify(comentarios));
+    lsSet('leitor_comentarios', JSON.stringify(comentarios));
   }
   function escHtml(s) {
     return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -1147,11 +1224,11 @@
   let minimizado = false;
 
   // Carregar notas salvas
-  const notasSalvas = localStorage.getItem('leitor_notas');
+  const notasSalvas = lsGet('leitor_notas');
   if (notasSalvas) { notasTextarea.value = notasSalvas; atualizarChars(); }
 
   notasTextarea.addEventListener('input', () => {
-    localStorage.setItem('leitor_notas', notasTextarea.value);
+    lsSet('leitor_notas', notasTextarea.value);
     atualizarChars();
   });
 
@@ -1173,7 +1250,7 @@
     e.stopPropagation();
     if (notasTextarea.value && confirm('Limpar todas as notas?')) {
       notasTextarea.value = '';
-      localStorage.removeItem('leitor_notas');
+      lsDel('leitor_notas');
       atualizarChars();
     }
   });
