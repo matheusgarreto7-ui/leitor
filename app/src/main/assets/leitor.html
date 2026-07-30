@@ -441,9 +441,7 @@
     font-size: 1.35rem; cursor: pointer; color: #10202a; font-weight: 700;
   }
   #barra-fixa button:active { transform: scale(0.94); }
-  #fx-play { background: #00cec9; }
-  #fx-pause { background: #fdcb6e; }
-  #fx-stop { background: #d63031; color: #fff; }
+  #fx-toggle { background: #00cec9; }
 </style>
 </head>
 <body>
@@ -1191,9 +1189,7 @@
 
 <!-- Barra fixa embaixo: play / pausar / parar (sempre visível) -->
 <div id="barra-fixa">
-  <button id="fx-play" title="Play">▶</button>
-  <button id="fx-pause" title="Pausar/Continuar">⏸</button>
-  <button id="fx-stop" title="Parar">⏹</button>
+  <button id="fx-toggle" title="Play / Pausar">▶</button>
 </div>
 
 <script>
@@ -1214,14 +1210,22 @@
     }
   });
 
-  // Barra fixa: repassa o toque para os botões reais de play/pausar/parar
-  function relay(fxId, realId) {
-    var fx = document.getElementById(fxId), r = document.getElementById(realId);
-    if (fx && r) fx.addEventListener('click', function () { r.click(); });
+  // Barra fixa: um unico botao que alterna entre play e pausar
+  var synthFx = window.speechSynthesis;
+  var fxToggle = document.getElementById('fx-toggle');
+  var bPlayFx = document.getElementById('btn-play');
+  var bPauseFx = document.getElementById('btn-pause');
+  function fxAtualizaIcone() {
+    if (!fxToggle) return;
+    if (synthFx && synthFx.speaking && !synthFx.paused) fxToggle.textContent = '⏸';
+    else fxToggle.textContent = '▶';
   }
-  relay('fx-play', 'btn-play');
-  relay('fx-pause', 'btn-pause');
-  relay('fx-stop', 'btn-stop');
+  if (fxToggle) fxToggle.addEventListener('click', function () {
+    if (synthFx && synthFx.speaking) { if (bPauseFx) bPauseFx.click(); }
+    else if (bPlayFx && !bPlayFx.disabled) { bPlayFx.click(); }
+    setTimeout(fxAtualizaIcone, 120);
+  });
+  setInterval(fxAtualizaIcone, 400);
 })();
 </script>
 </body>
