@@ -1,0 +1,4 @@
+// Projeto raiz — o plugin do Android é aplicado no módulo :app
+plugins {
+    id 'com.android.application' version '8.2.2' apply false
+}
