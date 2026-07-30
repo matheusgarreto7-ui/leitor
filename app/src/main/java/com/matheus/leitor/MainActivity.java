@@ -10,6 +10,7 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.media.AudioManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -265,7 +266,13 @@ public class MainActivity extends Activity {
         js("window.__ttsVoices && window.__ttsVoices(" + q(arr.toString()) + ")");
     }
 
+    @Override protected void onPause() {
+        // trava de seguranca: o app nunca pode sair de cena deixando o som mudo
+        muteBeeps(false);
+        super.onPause();
+    }
     @Override protected void onDestroy() {
+        muteBeeps(false);
         try { if (tts != null) { tts.stop(); tts.shutdown(); } } catch (Exception ignored) {}
         try { if (recognizer != null) recognizer.destroy(); } catch (Exception ignored) {}
         super.onDestroy();
@@ -280,6 +287,7 @@ public class MainActivity extends Activity {
         public void speak(final String text, final float rate, final float pitch,
                           final String voiceName, final String lang, final String id) {
             runOnUiThread(() -> {
+                muteBeeps(false); // garante que a leitura em voz nunca saia muda
                 if (!ttsReady) { js("window.__ttsError && window.__ttsError(" + q(id) + ")"); return; }
                 try {
                     tts.setSpeechRate(rate > 0 ? rate : 1f);
@@ -339,11 +347,180 @@ public class MainActivity extends Activity {
         }
     }
 
-    // ================= SpeechRecognizer (transcrição contínua) =================
+    // ================= SpeechRecognizer (ditado contínuo) =================
+    //
+    // v7 — quem acumula o texto agora é o JAVA, não o HTML.
+    //
+    // O Java é o único que sabe COM CERTEZA onde uma frase termina (onResults).
+    // Antes ele mandava texto solto e o HTML tentava adivinhar as fronteiras por
+    // tamanho/prefixo — era esse chute que fazia a frase nova apagar a anterior.
+    //
+    //   committed = tudo que já foi confirmado.  NUNCA é apagado.
+    //   partial   = hipótese da frase em andamento. Só ela muda na tela.
+    //   tela      = committed + partial
+    //
+    // Com isso, apagar virou impossível por construção: nenhum caminho do código
+    // escreve por cima de committed.
     private volatile boolean listening = false;
     private Handler recHandler;
+    private String committed = "";
+    private String partial = "";
+    private String prevPartial = "";
     private int errStreak = 0;
-    private String lastPartial = "";
+    private boolean onDevice = false;
+    private boolean onDeviceGaveUp = false;
+
+    // ---- silenciar os bipes do reconhecedor ----
+    // Cada startListening() toca o tom de início/fim do Google. Reiniciando a cada
+    // frase, isso vira o "pulsar" que se ouvia. Silenciamos só enquanto o mic está
+    // ligado e restauramos em qualquer saída (parar, pausar, fechar, erro).
+    private AudioManager audioMgr;
+    private boolean beepsMuted = false;
+    private static final int[] BEEP_STREAMS = {
+        AudioManager.STREAM_MUSIC,
+        AudioManager.STREAM_NOTIFICATION,
+        AudioManager.STREAM_SYSTEM,
+        AudioManager.STREAM_RING
+    };
+
+    private void muteBeeps(boolean mute) {
+        try {
+            if (audioMgr == null) audioMgr = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            if (audioMgr == null || mute == beepsMuted) return;
+            for (int st : BEEP_STREAMS) {
+                try {
+                    audioMgr.adjustStreamVolume(st,
+                        mute ? AudioManager.ADJUST_MUTE : AudioManager.ADJUST_UNMUTE, 0);
+                } catch (Exception ignored) {}
+            }
+            beepsMuted = mute;
+        } catch (Exception ignored) {}
+    }
+
+    // ---- montagem do texto ----
+    private static String join(String a, String b) {
+        if (a == null || a.isEmpty()) return (b == null) ? "" : b;
+        if (b == null || b.isEmpty()) return a;
+        return a.replaceAll("\\s+$", "") + " " + b;
+    }
+
+    private void emitState() {
+        js("window.__srText && window.__srText(" + q(join(committed, partial)) + ")");
+    }
+
+    /**
+     * A frase nova ainda e a mesma de antes (o motor so revisou o palpite), ou o
+     * motor recomecou do zero? Crescer, ou manter o mesmo comeco, e revisao.
+     */
+    private static boolean isContinuation(String prev, String next) {
+        if (next.length() >= prev.length()) return true;      // cresceu: mesma frase
+        String a = prev.toLowerCase(), b = next.toLowerCase();
+        if (a.startsWith(b) || b.startsWith(a)) return true;  // revisao da mesma frase
+        int n = Math.min(6, Math.min(a.length(), b.length()));
+        return n > 0 && a.regionMatches(0, b, 0, n);          // mesmo comeco: mesma frase
+    }
+
+    /** Fecha a frase atual: o que estava em andamento vira texto definitivo. */
+    private void commitPartial() {
+        String p = (partial == null) ? "" : partial.trim();
+        if (!p.isEmpty()) committed = join(committed, p);
+        partial = "";
+    }
+
+    private final RecognitionListener recListener = new RecognitionListener() {
+        @Override public void onReadyForSpeech(Bundle p) {}
+        @Override public void onBeginningOfSpeech() { errStreak = 0; }
+        @Override public void onRmsChanged(float r) {}
+        @Override public void onBufferReceived(byte[] b) {}
+        @Override public void onEndOfSpeech() {}
+
+        @Override public void onPartialResults(Bundle b) {
+            String t = firstResult(b);
+            if (t == null || t.trim().isEmpty()) return;
+            errStreak = 0;
+            t = t.trim();
+            // Rede de seguranca: em alguns aparelhos o motor recomeca a frase do
+            // zero DENTRO da mesma sessao, sem mandar onResults. Se isso acontecer,
+            // fechamos a frase anterior em vez de deixar a nova escrever por cima.
+            if (!prevPartial.isEmpty() && !isContinuation(prevPartial, t)) {
+                partial = prevPartial;
+                commitPartial();
+            }
+            prevPartial = t;
+            partial = t;
+            emitState();
+        }
+
+        @Override public void onResults(Bundle b) {
+            String t = firstResult(b);
+            if (t != null && !t.trim().isEmpty()) partial = t.trim();
+            commitPartial();
+            prevPartial = "";
+            emitState();
+            errStreak = 0;
+            restartSoon(onDevice ? 120 : 250);
+        }
+
+        @Override public void onError(int error) {
+            if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                listening = false;
+                muteBeeps(false);
+                js("window.__srError && window.__srError('permissao')");
+                js("window.__srEnd && window.__srEnd()");
+                return;
+            }
+            // Serviço ainda ocupado: apenas espera mais um pouco. Não conta como
+            // falha e não mexe no texto — era aqui que a v6 entrava em loop.
+            if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) { restartSoon(450); return; }
+
+            // Motor on-device sem o idioma baixado: cai para o reconhecedor normal.
+            if (onDevice && (error == 12 || error == 13 || error == SpeechRecognizer.ERROR_SERVER)) {
+                onDeviceGaveUp = true;
+                try { if (recognizer != null) recognizer.destroy(); } catch (Exception ignored) {}
+                recognizer = buildRecognizer();
+                restartSoon(250);
+                return;
+            }
+
+            // Qualquer outro fim de sessão: salva o que já foi dito e recomeça.
+            commitPartial();
+            prevPartial = "";
+            emitState();
+            errStreak++;
+            if (errStreak > 90) { // silêncio longo de verdade: encerra sozinho
+                listening = false;
+                muteBeeps(false);
+                js("window.__srError && window.__srError('semvoz')");
+                js("window.__srEnd && window.__srEnd()");
+                return;
+            }
+            restartSoon(onDevice ? 150 : 300);
+        }
+        @Override public void onEvent(int e, Bundle p) {}
+    };
+
+    /**
+     * Prefere o reconhecedor ON-DEVICE (Android 12+): ele não toca os bipes do
+     * Google, reinicia muito mais rápido e funciona sem internet. Se não existir
+     * ou não tiver português baixado, usa o reconhecedor normal.
+     */
+    private SpeechRecognizer buildRecognizer() {
+        SpeechRecognizer r = null;
+        if (!onDeviceGaveUp && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            try {
+                if (SpeechRecognizer.isOnDeviceRecognitionAvailable(this)) {
+                    r = SpeechRecognizer.createOnDeviceSpeechRecognizer(this);
+                    onDevice = true;
+                }
+            } catch (Throwable ignored) { r = null; }
+        }
+        if (r == null) {
+            r = SpeechRecognizer.createSpeechRecognizer(this);
+            onDevice = false;
+        }
+        r.setRecognitionListener(recListener);
+        return r;
+    }
 
     private void startListening() {
         try {
@@ -360,52 +537,14 @@ public class MainActivity extends Activity {
             if (recHandler == null) recHandler = new Handler(Looper.getMainLooper());
             listening = true;
             errStreak = 0;
-            if (recognizer == null) {
-                recognizer = SpeechRecognizer.createSpeechRecognizer(this);
-                recognizer.setRecognitionListener(new RecognitionListener() {
-                    @Override public void onReadyForSpeech(Bundle p) {}
-                    @Override public void onBeginningOfSpeech() {}
-                    @Override public void onRmsChanged(float r) {}
-                    @Override public void onBufferReceived(byte[] b) {}
-                    @Override public void onEndOfSpeech() {}
-                    @Override public void onPartialResults(Bundle partial) {
-                        errStreak = 0;
-                        String t = firstResult(partial);
-                        if (t != null && !t.isEmpty()) lastPartial = t;
-                        emitText(t, false);
-                    }
-                    @Override public void onResults(Bundle results) {
-                        errStreak = 0;
-                        lastPartial = "";
-                        emitText(firstResult(results), true);
-                        restartSoon(40);   // continua ouvindo, sem parar (gap curto p/ nao cortar a fala)
-                    }
-                    @Override public void onError(int error) {
-                        if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
-                            listening = false;
-                            js("window.__srError && window.__srError('permissao')");
-                            js("window.__srEnd && window.__srEnd()");
-                            return;
-                        }
-                        // sessão terminou sem final: commita o que já foi falado (não apaga)
-                        if (lastPartial != null && !lastPartial.isEmpty()) {
-                            emitText(lastPartial, true);
-                            lastPartial = "";
-                        }
-                        errStreak++;
-                        if (errStreak > 30) { // ~3 min de silêncio contínuo: encerra sozinho
-                            listening = false;
-                            js("window.__srError && window.__srError('semvoz')");
-                            js("window.__srEnd && window.__srEnd()");
-                            return;
-                        }
-                        restartSoon(120);
-                    }
-                    @Override public void onEvent(int e, Bundle p) {}
-                });
-            }
+            committed = "";
+            partial = "";
+            prevPartial = "";
+            if (recognizer == null) recognizer = buildRecognizer();
+            muteBeeps(true);
             startSession();
         } catch (Exception e) {
+            muteBeeps(false);
             js("window.__srError && window.__srError('erro')");
         }
     }
@@ -416,18 +555,25 @@ public class MainActivity extends Activity {
             Intent it = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
             it.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
             it.putExtra(RecognizerIntent.EXTRA_LANGUAGE, recLang);
+            it.putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, recLang);
             it.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
-            // Finaliza cada frase apos ~1s de silencio e recomeca (ditado continuo que NAO apaga).
-            it.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1000);
-            it.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 800);
+            it.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
+            it.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, getPackageName());
+            if (onDevice) it.putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true);
+            // Pausa natural NÃO encerra a frase.
+            // A v6 usava 1000/800ms: fechava a frase a cada respiro, reiniciava o
+            // motor toda hora (o "pulsar") e cada reinício comia um pedaço da fala.
+            it.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3000);
+            it.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2500);
             recognizer.startListening(it);
         } catch (Exception e) {
-            restartSoon(500);
+            restartSoon(600);
         }
     }
 
     private void restartSoon(long delayMs) {
         if (!listening || recHandler == null) return;
+        recHandler.removeCallbacksAndMessages(null); // nunca empilha reinícios
         recHandler.postDelayed(() -> {
             if (listening && recognizer != null) startSession();
         }, delayMs);
@@ -435,8 +581,11 @@ public class MainActivity extends Activity {
 
     private void stopListening() {
         listening = false;
+        commitPartial();   // a última frase falada nunca se perde
+        emitState();
         try { if (recHandler != null) recHandler.removeCallbacksAndMessages(null); } catch (Exception ignored) {}
         try { if (recognizer != null) recognizer.cancel(); } catch (Exception ignored) {}
+        muteBeeps(false);
         js("window.__srEnd && window.__srEnd()");
     }
 
@@ -446,9 +595,5 @@ public class MainActivity extends Activity {
             if (list != null && !list.isEmpty()) return list.get(0);
         } catch (Exception ignored) {}
         return null;
-    }
-    private void emitText(String t, boolean isFinal) {
-        if (t == null) return;
-        js("window.__srResult && window.__srResult(" + JSONObject.quote(t) + "," + (isFinal ? "true" : "false") + ")");
     }
 }
