@@ -284,7 +284,6 @@ public class MainActivity extends Activity {
                 try {
                     tts.setSpeechRate(rate > 0 ? rate : 1f);
                     tts.setPitch(pitch > 0 ? pitch : 1f);
-                    // Prioridade: voz escolhida no app > voz do JS > idioma
                     String savedVoice = prefs.getString("voice", null);
                     String target = (savedVoice != null) ? savedVoice : voiceName;
                     boolean set = false;
@@ -324,12 +323,27 @@ public class MainActivity extends Activity {
         }
         @JavascriptInterface public void stopRecognition() { runOnUiThread(MainActivity.this::stopListening); }
         @JavascriptInterface public void pickVoice() { runOnUiThread(MainActivity.this::showEnginePicker); }
+        @JavascriptInterface public void pasteInto() {
+            runOnUiThread(() -> {
+                try {
+                    ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                    ClipData cd = cm.getPrimaryClip();
+                    String t = "";
+                    if (cd != null && cd.getItemCount() > 0) {
+                        CharSequence c = cd.getItemAt(0).coerceToText(MainActivity.this);
+                        t = (c == null) ? "" : c.toString();
+                    }
+                    js("window.__pasteText && window.__pasteText(" + q(t) + ")");
+                } catch (Exception ignored) {}
+            });
+        }
     }
 
     // ================= SpeechRecognizer (transcrição contínua) =================
     private volatile boolean listening = false;
     private Handler recHandler;
     private int errStreak = 0;
+    private String lastPartial = "";
 
     private void startListening() {
         try {
@@ -354,10 +368,16 @@ public class MainActivity extends Activity {
                     @Override public void onRmsChanged(float r) {}
                     @Override public void onBufferReceived(byte[] b) {}
                     @Override public void onEndOfSpeech() {}
-                    @Override public void onPartialResults(Bundle partial) { errStreak = 0; emit(partial, false); }
+                    @Override public void onPartialResults(Bundle partial) {
+                        errStreak = 0;
+                        String t = firstResult(partial);
+                        if (t != null && !t.isEmpty()) lastPartial = t;
+                        emitText(t, false);
+                    }
                     @Override public void onResults(Bundle results) {
                         errStreak = 0;
-                        emit(results, true);
+                        lastPartial = "";
+                        emitText(firstResult(results), true);
                         restartSoon(120);   // continua ouvindo, sem parar
                     }
                     @Override public void onError(int error) {
@@ -367,8 +387,13 @@ public class MainActivity extends Activity {
                             js("window.__srEnd && window.__srEnd()");
                             return;
                         }
+                        // sessão terminou sem final: commita o que já foi falado (não apaga)
+                        if (lastPartial != null && !lastPartial.isEmpty()) {
+                            emitText(lastPartial, true);
+                            lastPartial = "";
+                        }
                         errStreak++;
-                        if (errStreak > 12) { // silêncio/erro prolongado: encerra
+                        if (errStreak > 30) { // ~3 min de silêncio contínuo: encerra sozinho
                             listening = false;
                             js("window.__srError && window.__srError('semvoz')");
                             js("window.__srEnd && window.__srEnd()");
@@ -416,13 +441,15 @@ public class MainActivity extends Activity {
         js("window.__srEnd && window.__srEnd()");
     }
 
-    private void emit(Bundle b, boolean isFinal) {
+    private String firstResult(Bundle b) {
         try {
             ArrayList<String> list = b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
-            if (list != null && !list.isEmpty()) {
-                String t = list.get(0);
-                js("window.__srResult && window.__srResult(" + JSONObject.quote(t == null ? "" : t) + "," + (isFinal ? "true" : "false") + ")");
-            }
+            if (list != null && !list.isEmpty()) return list.get(0);
         } catch (Exception ignored) {}
+        return null;
+    }
+    private void emitText(String t, boolean isFinal) {
+        if (t == null) return;
+        js("window.__srResult && window.__srResult(" + JSONObject.quote(t) + "," + (isFinal ? "true" : "false") + ")");
     }
 }
