@@ -35,7 +35,11 @@ import android.widget.Toast;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.text.Normalizer;
 import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.TreeSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -378,6 +382,8 @@ public class MainActivity extends Activity {
     private String committed = "";
     private String partial = "";
     private String prevPartial = "";
+    private long ultimaMudanca = 0;
+    private final List<Integer> pausas = new ArrayList<>();
     private int errStreak = 0;
     private boolean onDevice = false;
     private boolean onDeviceGaveUp = false;
@@ -409,15 +415,145 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {}
     }
 
+    // ================= Pontuação automática do ditado =================
+    private static final LinkedHashMap<String, String> COMANDOS_VOZ = new LinkedHashMap<>();
+    static {
+        COMANDOS_VOZ.put("ponto de interrogacao", "?");
+        COMANDOS_VOZ.put("ponto de exclamacao", "!");
+        COMANDOS_VOZ.put("ponto e virgula", ";");
+        COMANDOS_VOZ.put("abre parenteses", "(");
+        COMANDOS_VOZ.put("fecha parenteses", ")");
+        COMANDOS_VOZ.put("abre parentese", "(");
+        COMANDOS_VOZ.put("fecha parentese", ")");
+        COMANDOS_VOZ.put("novo paragrafo", "\n\n");
+        COMANDOS_VOZ.put("quebra de linha", "\n");
+        COMANDOS_VOZ.put("nova linha", "\n");
+        COMANDOS_VOZ.put("abre aspas", "\u201C");
+        COMANDOS_VOZ.put("fecha aspas", "\u201D");
+        COMANDOS_VOZ.put("dois pontos", ":");
+        COMANDOS_VOZ.put("ponto final", ".");
+        COMANDOS_VOZ.put("reticencias", "...");
+        COMANDOS_VOZ.put("interrogacao", "?");
+        COMANDOS_VOZ.put("exclamacao", "!");
+        COMANDOS_VOZ.put("paragrafo", "\n\n");
+        COMANDOS_VOZ.put("virgula", ",");
+        COMANDOS_VOZ.put("travessao", "\u2014");
+        COMANDOS_VOZ.put("ponto", ".");
+    }
+
+    /** minusculo, sem acento e sem pontuacao: "Vírgula," -> "virgula" */
+    private static String simples(String s) {
+        if (s == null) return "";
+        String n = Normalizer.normalize(s, Normalizer.Form.NFD).replaceAll("\\p{M}+", "");
+        return n.toLowerCase(Locale.ROOT).replaceAll("[^a-z]", "");
+    }
+
+    private static void anexar(StringBuilder sb, String pedaco, boolean pontuacao) {
+        if (pedaco == null || pedaco.isEmpty()) return;
+        if (sb.length() == 0) { sb.append(pedaco); return; }
+        boolean abertura = pedaco.equals("(") || pedaco.equals("\u201C");
+        if (pontuacao && !abertura) {
+            while (sb.length() > 0 && sb.charAt(sb.length() - 1) == ' ') sb.setLength(sb.length() - 1);
+            sb.append(pedaco);
+            return;
+        }
+        char ult = sb.charAt(sb.length() - 1);
+        if (ult != '\n' && ult != ' ' && ult != '(' && ult != '\u201C') sb.append(' ');
+        sb.append(pedaco);
+    }
+
+    /** Troca as palavras faladas pelos sinais: "virgula" -> "," */
+    private static String aplicarComandosDeVoz(String texto) {
+        if (texto == null || texto.trim().isEmpty()) return "";
+        String[] tk = texto.trim().split("\\s+");
+        StringBuilder sb = new StringBuilder();
+        int i = 0;
+        while (i < tk.length) {
+            String simbolo = null; int usados = 0;
+            for (int n = 3; n >= 1 && simbolo == null; n--) {
+                if (i + n > tk.length) continue;
+                StringBuilder chave = new StringBuilder();
+                for (int k = 0; k < n; k++) { if (k > 0) chave.append(' '); chave.append(simples(tk[i + k])); }
+                String c = chave.toString();
+                // "ponto de vista"/"ponto de partida": aqui "ponto" e palavra normal
+                if (c.equals("ponto") && i + 1 < tk.length && simples(tk[i + 1]).equals("de")) continue;
+                String v = COMANDOS_VOZ.get(c);
+                if (v != null) { simbolo = v; usados = n; }
+            }
+            if (simbolo != null) { anexar(sb, simbolo, true); i += usados; }
+            else { anexar(sb, tk[i], false); i++; }
+        }
+        return sb.toString();
+    }
+
+    /** Vírgulas nas pausas curtas. So insere onde ainda ha um espaco: se o motor
+     *  revisou a frase e a posicao nao bate mais, simplesmente nao mexe. */
+    private static String inserirVirgulas(String texto, List<Integer> posicoes) {
+        if (texto == null || texto.isEmpty() || posicoes == null || posicoes.isEmpty()) return texto;
+        StringBuilder sb = new StringBuilder(texto);
+        TreeSet<Integer> ord = new TreeSet<>(posicoes);
+        Iterator<Integer> it = ord.descendingIterator();
+        while (it.hasNext()) {
+            int p = it.next();
+            if (p <= 0 || p >= sb.length()) continue;
+            if (sb.charAt(p) != ' ') continue;
+            char ant = sb.charAt(p - 1);
+            if (",.;:!?".indexOf(ant) >= 0) continue;
+            sb.insert(p, ',');
+        }
+        return sb.toString();
+    }
+
+    private static String limparEspacos(String t) {
+        t = t.replaceAll("[ \\t]+", " ");
+        t = t.replaceAll("[ \\t]+([,.;:!?])", "$1");
+        // a pausa e a palavra "virgula" podem cair no mesmo lugar: nao pode dobrar
+        t = t.replaceAll("([,;:])(?:[ \\t]*[,;:])+", "$1");
+        t = t.replaceAll("[,;:]+[ \\t]*([.!?])", "$1");
+        t = t.replaceAll("([,;:])(?=[^\\s])", "$1 ");
+        t = t.replaceAll("([.!?])(?=[\\p{L}])", "$1 ");
+        t = t.replaceAll("[ \\t]*\n[ \\t]*", "\n");
+        // apara so espacos: um trim() comum comeria a quebra de paragrafo do inicio
+        return t.replaceAll("^[ \\t]+", "").replaceAll("[ \\t]+$", "");
+    }
+
+    private static String maiusculaInicial(String t) {
+        for (int i = 0; i < t.length(); i++) {
+            char c = t.charAt(i);
+            if (Character.isLetter(c)) return t.substring(0, i) + Character.toUpperCase(c) + t.substring(i + 1);
+            if (!Character.isWhitespace(c) && c != '\u201C' && c != '(') break;
+        }
+        return t;
+    }
+
+    private static boolean comecoDeFrase(String c) {
+        if (c == null || c.trim().isEmpty()) return true;
+        String t = c.trim();
+        return ".!?".indexOf(t.charAt(t.length() - 1)) >= 0 || c.endsWith("\n");
+    }
+
+    /** Fecha a frase: arruma espacos, maiuscula no comeco e ponto no fim. */
+    private static String finalizarFrase(String t, boolean comeco) {
+        t = limparEspacos(t);
+        if (t.isEmpty()) return "";
+        if (comeco) t = maiusculaInicial(t);
+        char ult = t.charAt(t.length() - 1);
+        if (".!?,;:".indexOf(ult) < 0 && !t.endsWith("\n")) t = t + ".";
+        return t;
+    }
+
     // ---- montagem do texto ----
     private static String join(String a, String b) {
         if (a == null || a.isEmpty()) return (b == null) ? "" : b;
         if (b == null || b.isEmpty()) return a;
-        return a.replaceAll("\\s+$", "") + " " + b;
+        if (a.endsWith("\n") || b.startsWith("\n")) return a.replaceAll("[ \\t]+$", "") + b;
+        return a.replaceAll("[ \\t]+$", "") + " " + b;
     }
 
     private void emitState() {
-        js("window.__srText && window.__srText(" + q(join(committed, partial)) + ")");
+        // na tela, a frase em andamento ja aparece com os sinais falados trocados
+        String mostrar = partial.isEmpty() ? "" : aplicarComandosDeVoz(partial);
+        js("window.__srText && window.__srText(" + q(join(committed, mostrar)) + ")");
     }
 
     /**
@@ -432,11 +568,17 @@ public class MainActivity extends Activity {
         return n > 0 && a.regionMatches(0, b, 0, n);          // mesmo comeco: mesma frase
     }
 
-    /** Fecha a frase atual: o que estava em andamento vira texto definitivo. */
+    /** Fecha a frase atual: pontua e vira texto definitivo. */
     private void commitPartial() {
         String p = (partial == null) ? "" : partial.trim();
-        if (!p.isEmpty()) committed = join(committed, p);
+        if (!p.isEmpty()) {
+            p = inserirVirgulas(p, pausas);          // pausas curtas viram virgula
+            p = aplicarComandosDeVoz(p);             // "virgula", "ponto", "paragrafo"...
+            p = finalizarFrase(p, comecoDeFrase(committed));
+            committed = join(committed, p);
+        }
         partial = "";
+        pausas.clear();
     }
 
     private final RecognitionListener recListener = new RecognitionListener() {
@@ -451,6 +593,13 @@ public class MainActivity extends Activity {
             if (t == null || t.trim().isEmpty()) return;
             errStreak = 0;
             t = t.trim();
+            // pausa curta no meio da fala -> marca o ponto para virar virgula no fim
+            long agora = System.currentTimeMillis();
+            if (!prevPartial.isEmpty() && t.startsWith(prevPartial) && t.length() > prevPartial.length()) {
+                long gap = agora - ultimaMudanca;
+                if (gap >= 700 && gap <= 2600) pausas.add(prevPartial.length());
+            }
+            ultimaMudanca = agora;
             // Rede de seguranca: em alguns aparelhos o motor recomeca a frase do
             // zero DENTRO da mesma sessao, sem mandar onResults. Se isso acontecer,
             // fechamos a frase anterior em vez de deixar a nova escrever por cima.
@@ -552,6 +701,8 @@ public class MainActivity extends Activity {
             committed = "";
             partial = "";
             prevPartial = "";
+            pausas.clear();
+            ultimaMudanca = System.currentTimeMillis();
             if (recognizer == null) recognizer = buildRecognizer();
             muteBeeps(true);
             startSession();
