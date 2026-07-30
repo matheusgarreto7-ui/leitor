@@ -1033,6 +1033,7 @@
   let recognition = null;
   let micAtivo = false;
   let textoBase = '';
+  let interimAtual = '';
 
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (SR) {
@@ -1047,8 +1048,22 @@
         if (e.results[i].isFinal) fim += e.results[i][0].transcript;
         else interim += e.results[i][0].transcript;
       }
-      if (fim) textoBase = (textoBase ? textoBase.replace(/\s+$/, '') + ' ' : '') + fim.trim();
-      popupInput.value = interim ? (textoBase ? textoBase + ' ' : '') + interim.trim() : textoBase;
+      const junta = (a, b) => !a ? (b || '') : (!b ? a : a.replace(/\s+$/, '') + ' ' + b);
+      if (fim) {
+        textoBase = junta(textoBase, fim.trim());
+        interimAtual = '';
+        popupInput.value = textoBase;
+        return;
+      }
+      const novo = interim.trim();
+      if (!novo) { popupInput.value = junta(textoBase, interimAtual); return; }
+      // se o reconhecedor recomecou a frase (partial encolheu sem continuar), consolida o anterior p/ nao apagar
+      if (interimAtual && novo.length < interimAtual.length &&
+          !novo.startsWith(interimAtual.slice(0, Math.min(4, interimAtual.length)))) {
+        textoBase = junta(textoBase, interimAtual);
+      }
+      interimAtual = novo;
+      popupInput.value = junta(textoBase, interimAtual);
     };
 
     recognition.onend = () => {
@@ -1066,11 +1081,13 @@
       if (!micAtivo) {
         micAtivo = true;
         textoBase = popupInput.value;
+        interimAtual = '';
         try { recognition.start(); } catch(_) {}
         btnMic.classList.add('gravando');
         btnMic.title = 'Parar transcrição';
       } else {
         micAtivo = false;
+        if (interimAtual) { textoBase = (textoBase ? textoBase.replace(/\s+$/, '') + ' ' : '') + interimAtual; interimAtual = ''; popupInput.value = textoBase; }
         try { recognition.stop(); } catch(_) {}
         btnMic.classList.remove('gravando');
         btnMic.title = 'Falar para transcrever';
