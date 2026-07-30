@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- RECORD_AUDIO: apenas para a transcrição por voz nos comentários.
-         Nenhuma permissão de INTERNET é declarada: o app é 100% offline. -->
+    <!-- Microfone: usado só na transcrição por voz dos comentários -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Internet: usada só pelo reconhecimento de voz (transcrição). A leitura em voz continua offline. -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <!-- Necessário no Android 11+ para consultar o serviço de reconhecimento de voz -->
     <queries>
