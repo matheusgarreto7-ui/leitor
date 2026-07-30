@@ -104,6 +104,7 @@
     function SR() {
       this.lang = 'pt-BR'; this.continuous = false; this.interimResults = false;
       this.onstart = null; this.onresult = null; this.onend = null; this.onerror = null;
+      this.onfulltext = null;
     }
     SR.prototype.start = function () {
       srCurrent = this;
@@ -116,11 +117,17 @@
     window.webkitSpeechRecognition = SR;
     window.SpeechRecognition = SR;
 
+    // v7: o Java manda o texto JA montado (confirmado + frase em andamento).
+    // O HTML nao acumula mais nada, so exibe -- por isso nada pode ser apagado.
+    window.__srText = function (full) {
+      var r = srCurrent; if (!r || !r.onfulltext) return;
+      try { r.onfulltext(full == null ? '' : full); } catch (e) {}
+    };
+    // mantido so por compatibilidade; o Java nao usa mais
     window.__srResult = function (text, isFinal) {
       var r = srCurrent; if (!r || !r.onresult) return;
       var res = [{ 0: { transcript: text }, isFinal: !!isFinal, length: 1 }];
-      var ev = { resultIndex: 0, results: res };
-      try { r.onresult(ev); } catch (e) {}
+      try { r.onresult({ resultIndex: 0, results: res }); } catch (e) {}
     };
     window.__srEnd = function () {
       var r = srCurrent; if (r && r.onend) try { r.onend({}); } catch (e) {}
@@ -1032,8 +1039,7 @@
   const btnMic = $('btn-mic');
   let recognition = null;
   let micAtivo = false;
-  let textoBase = '';
-  let interimAtual = '';
+  let prefixo = '';   // o que ja estava escrito no campo antes de ligar o mic
 
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (SR) {
@@ -1042,55 +1048,35 @@
     recognition.continuous = true;
     recognition.interimResults = true;
 
-    recognition.onresult = (e) => {
-      let fim = '', interim = '';
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        if (e.results[i].isFinal) fim += e.results[i][0].transcript;
-        else interim += e.results[i][0].transcript;
-      }
-      const junta = (a, b) => !a ? (b || '') : (!b ? a : a.replace(/\s+$/, '') + ' ' + b);
-      if (fim) {
-        textoBase = junta(textoBase, fim.trim());
-        interimAtual = '';
-        popupInput.value = textoBase;
-        return;
-      }
-      const novo = interim.trim();
-      if (!novo) { popupInput.value = junta(textoBase, interimAtual); return; }
-      // se o reconhecedor recomecou a frase (partial encolheu sem continuar), consolida o anterior p/ nao apagar
-      if (interimAtual && novo.length < interimAtual.length &&
-          !novo.startsWith(interimAtual.slice(0, Math.min(4, interimAtual.length)))) {
-        textoBase = junta(textoBase, interimAtual);
-      }
-      interimAtual = novo;
-      popupInput.value = junta(textoBase, interimAtual);
+    // O Java entrega o texto inteiro, pronto. Aqui e so mostrar na tela.
+    recognition.onfulltext = (full) => {
+      popupInput.value = full
+        ? (prefixo ? prefixo.replace(/\s+$/, '') + ' ' + full : full)
+        : prefixo;
+      popupInput.scrollTop = popupInput.scrollHeight;
     };
 
-    recognition.onend = () => {
-      if (micAtivo) { try { recognition.start(); } catch(_) {} }
-    };
-
-    recognition.onerror = () => {
+    const pararUI = () => {
       micAtivo = false;
       btnMic.classList.remove('gravando');
       btnMic.title = 'Falar para transcrever';
     };
 
+    // o Java so avisa o fim quando para de verdade (ele mesmo se reinicia sozinho)
+    recognition.onend = pararUI;
+    recognition.onerror = pararUI;
+
     btnMic.addEventListener('click', (e) => {
       e.stopPropagation();
       if (!micAtivo) {
         micAtivo = true;
-        textoBase = popupInput.value;
-        interimAtual = '';
+        prefixo = popupInput.value;
         try { recognition.start(); } catch(_) {}
         btnMic.classList.add('gravando');
-        btnMic.title = 'Parar transcrição';
+        btnMic.title = 'Parar transcricao';
       } else {
-        micAtivo = false;
-        if (interimAtual) { textoBase = (textoBase ? textoBase.replace(/\s+$/, '') + ' ' : '') + interimAtual; interimAtual = ''; popupInput.value = textoBase; }
         try { recognition.stop(); } catch(_) {}
-        btnMic.classList.remove('gravando');
-        btnMic.title = 'Falar para transcrever';
+        pararUI();
       }
     });
   } else {
