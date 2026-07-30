@@ -378,7 +378,7 @@ public class MainActivity extends Activity {
                         errStreak = 0;
                         lastPartial = "";
                         emitText(firstResult(results), true);
-                        restartSoon(120);   // continua ouvindo, sem parar
+                        restartSoon(40);   // continua ouvindo, sem parar (gap curto p/ nao cortar a fala)
                     }
                     @Override public void onError(int error) {
                         if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
@@ -399,7 +399,7 @@ public class MainActivity extends Activity {
                             js("window.__srEnd && window.__srEnd()");
                             return;
                         }
-                        restartSoon(300);
+                        restartSoon(120);
                     }
                     @Override public void onEvent(int e, Bundle p) {}
                 });
