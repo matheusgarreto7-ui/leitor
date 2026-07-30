@@ -12,6 +12,8 @@ import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
@@ -282,6 +284,7 @@ public class MainActivity extends Activity {
                 try {
                     tts.setSpeechRate(rate > 0 ? rate : 1f);
                     tts.setPitch(pitch > 0 ? pitch : 1f);
+                    // Prioridade: voz escolhida no app > voz do JS > idioma
                     String savedVoice = prefs.getString("voice", null);
                     String target = (savedVoice != null) ? savedVoice : voiceName;
                     boolean set = false;
@@ -323,7 +326,11 @@ public class MainActivity extends Activity {
         @JavascriptInterface public void pickVoice() { runOnUiThread(MainActivity.this::showEnginePicker); }
     }
 
-    // ================= SpeechRecognizer =================
+    // ================= SpeechRecognizer (transcrição contínua) =================
+    private volatile boolean listening = false;
+    private Handler recHandler;
+    private int errStreak = 0;
+
     private void startListening() {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
@@ -336,6 +343,9 @@ public class MainActivity extends Activity {
                 js("window.__srError && window.__srError('indisponivel')");
                 return;
             }
+            if (recHandler == null) recHandler = new Handler(Looper.getMainLooper());
+            listening = true;
+            errStreak = 0;
             if (recognizer == null) {
                 recognizer = SpeechRecognizer.createSpeechRecognizer(this);
                 recognizer.setRecognitionListener(new RecognitionListener() {
@@ -344,24 +354,68 @@ public class MainActivity extends Activity {
                     @Override public void onRmsChanged(float r) {}
                     @Override public void onBufferReceived(byte[] b) {}
                     @Override public void onEndOfSpeech() {}
-                    @Override public void onPartialResults(Bundle partial) { emit(partial, false); }
-                    @Override public void onResults(Bundle results) { emit(results, true); js("window.__srEnd && window.__srEnd()"); }
-                    @Override public void onError(int error) { js("window.__srEnd && window.__srEnd()"); }
+                    @Override public void onPartialResults(Bundle partial) { errStreak = 0; emit(partial, false); }
+                    @Override public void onResults(Bundle results) {
+                        errStreak = 0;
+                        emit(results, true);
+                        restartSoon(120);   // continua ouvindo, sem parar
+                    }
+                    @Override public void onError(int error) {
+                        if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                            listening = false;
+                            js("window.__srError && window.__srError('permissao')");
+                            js("window.__srEnd && window.__srEnd()");
+                            return;
+                        }
+                        errStreak++;
+                        if (errStreak > 12) { // silêncio/erro prolongado: encerra
+                            listening = false;
+                            js("window.__srError && window.__srError('semvoz')");
+                            js("window.__srEnd && window.__srEnd()");
+                            return;
+                        }
+                        restartSoon(300);
+                    }
                     @Override public void onEvent(int e, Bundle p) {}
                 });
             }
-            Intent it = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
-            it.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-            it.putExtra(RecognizerIntent.EXTRA_LANGUAGE, recLang);
-            it.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
-            recognizer.startListening(it);
+            startSession();
         } catch (Exception e) {
             js("window.__srError && window.__srError('erro')");
         }
     }
-    private void stopListening() {
-        try { if (recognizer != null) recognizer.stopListening(); } catch (Exception ignored) {}
+
+    private void startSession() {
+        if (!listening || recognizer == null) return;
+        try {
+            Intent it = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+            it.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+            it.putExtra(RecognizerIntent.EXTRA_LANGUAGE, recLang);
+            it.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
+            // tolera pausas maiores antes de encerrar a sessão (ditado contínuo)
+            it.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 6000);
+            it.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 6000);
+            it.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 60000);
+            recognizer.startListening(it);
+        } catch (Exception e) {
+            restartSoon(500);
+        }
     }
+
+    private void restartSoon(long delayMs) {
+        if (!listening || recHandler == null) return;
+        recHandler.postDelayed(() -> {
+            if (listening && recognizer != null) startSession();
+        }, delayMs);
+    }
+
+    private void stopListening() {
+        listening = false;
+        try { if (recHandler != null) recHandler.removeCallbacksAndMessages(null); } catch (Exception ignored) {}
+        try { if (recognizer != null) recognizer.cancel(); } catch (Exception ignored) {}
+        js("window.__srEnd && window.__srEnd()");
+    }
+
     private void emit(Bundle b, boolean isFinal) {
         try {
             ArrayList<String> list = b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
