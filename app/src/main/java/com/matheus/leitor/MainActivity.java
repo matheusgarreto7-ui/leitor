@@ -24,6 +24,7 @@ import android.speech.tts.Voice;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.webkit.JavascriptInterface;
+import android.webkit.WebChromeClient;
 import android.webkit.WebView;
 import android.webkit.WebSettings;
 import android.webkit.WebViewClient;
@@ -95,6 +96,9 @@ public class MainActivity extends Activity {
         web.setWebViewClient(new WebViewClient() {
             @Override public boolean shouldOverrideUrlLoading(WebView view, String url) { return false; }
         });
+        // Sem um WebChromeClient o WebView ignora alert/confirm/prompt: era por isso
+        // que os botoes "limpar" das notas e dos comentarios nao faziam nada.
+        web.setWebChromeClient(new WebChromeClient());
 
         initTts(prefs.getString("engine", null), null);
 
@@ -314,6 +318,14 @@ public class MainActivity extends Activity {
             runOnUiThread(() -> { try { if (ttsReady) tts.stop(); } catch (Exception ignored) {} });
         }
         @JavascriptInterface public void requestVoices() { runOnUiThread(MainActivity.this::pushVoices); }
+        /** Guarda preferencias da tela (ex.: velocidade) fora do WebView, para nao se perderem. */
+        @JavascriptInterface public void setPref(final String key, final String value) {
+            try { prefs.edit().putString("web_" + key, value == null ? "" : value).apply(); } catch (Exception ignored) {}
+        }
+        @JavascriptInterface public String getPref(final String key, final String def) {
+            String fallback = (def == null) ? "" : def;
+            try { return prefs.getString("web_" + key, fallback); } catch (Exception e) { return fallback; }
+        }
         @JavascriptInterface public void copy(final String text) {
             runOnUiThread(() -> {
                 try {
